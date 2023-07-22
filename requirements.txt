@@ -106,7 +106,6 @@ protobuf==4.23.4
 psutil==5.9.5
 ptyprocess==0.6.0
 pure-eval==0.2.2
-pyargon2==1.0.6
 pyarrow==12.0.1
 pyasn1==0.5.0
 pycodestyle==2.6.0
@@ -116,11 +115,7 @@ PyInstaller==3.6
 Pympler==1.0.1
 pynput==1.7.6
 pyobjc-core==9.0
-pyobjc-framework-ApplicationServices==9.0
-pyobjc-framework-Cocoa==9.0
-pyobjc-framework-Quartz==9.0
 pyparsing==2.4.7
-pyqtgraph==0.13.2
 pytesseract==0.3.4
 python-dateutil==2.8.2
 python-docx==0.8.11
