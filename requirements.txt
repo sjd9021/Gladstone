@@ -13,7 +13,6 @@ backcall==0.2.0
 backports.zoneinfo==0.2.1
 beautifulsoup4==4.12.2
 bidict==0.21.2
-binwalk==2.3.3+89801fbc
 bitbnspy==0.1.33
 bleach==6.0.0
 blinker==1.6.2
