@@ -176,13 +176,13 @@ def main():
                             damage_description = damage_description + " "
                     data[damage_description] = uploaded_files
 
-                SubmitForm = st.form_submit_button("Download.docx")
+                SubmitForm = st.form_submit_button("Generate Word Doc")
                 if SubmitForm:
                     x = download_docx(data)
                     value = x.getvalue()
                     c = 1
             if c==1:
-                st.download_button("download docx", value, "test.docx")
+                st.download_button("download docx", value, "File_name.docx")
 
 
     with col3:
