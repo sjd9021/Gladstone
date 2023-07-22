@@ -144,14 +144,16 @@ def image_converter(imgs):
 def download_docx(data):
     edited_doc = image_converter(data)
     buff = io.BytesIO()  # create a buffer
-    document.save(buff)  # write the docx to the buffer
-    components.html(
-        download_button(buff.getvalue(), "test.docx"),
-        height=0,
-    )
+    document.save(buff)  # write the docx to the buffers
+    return buff
+    # components.html(
+    #     download_button(buff.getvalue(), "test.docx"),
+    #     height=0,
+    # )
+
 def main():
     st.markdown("<h1 style='text-align: center; color: grey;'>Image Parser</h1>", unsafe_allow_html=True)
-
+    c = 0
     col1, col2, col3 = st.columns([1, 3, 1])
 
     data = {}
@@ -176,7 +178,11 @@ def main():
 
                 SubmitForm = st.form_submit_button("Download.docx")
                 if SubmitForm:
-                    download_docx(data)
+                    x = download_docx(data)
+                    value = x.getvalue()
+                    c = 1
+            if c==1:
+                st.download_button("download docx", value, "test.docx")
 
 
     with col3:
