@@ -19,36 +19,36 @@ font = style.font
 font.name = 'Arial'
 font.size = Pt(11)
 
-def download_button(object_to_download, download_filename):
-    """
-    Generates a link to download the given object_to_download.
-    Params:
-    ------
-    object_to_download:  The object to be downloaded.
-    download_filename (str): filename and extension of file. e.g. mydata.docx,
-    Returns:
-    -------
-    (str): the anchor tag to download object_to_download
-    """
-    try:
-        # some strings <-> bytes conversions necessary here
-        b64 = base64.b64encode(object_to_download.encode()).decode()
-
-    except AttributeError as e:
-        b64 = base64.b64encode(object_to_download).decode()
-
-    dl_link = f"""
-    <html>
-    <head>
-    <title>Start Auto Download file</title>
-    <script src="http://code.jquery.com/jquery-3.2.1.min.js"></script>
-    <script>
-    $('<a href="data:application/vnd.openxmlformats-officedocument.wordprocessingml.document;base64,{b64}" download="{download_filename}">')[0].click()
-    </script>
-    </head>
-    </html>
-    """
-    return dl_link
+# def download_button(object_to_download, download_filename):
+#     """
+#     Generates a link to download the given object_to_download.
+#     Params:
+#     ------
+#     object_to_download:  The object to be downloaded.
+#     download_filename (str): filename and extension of file. e.g. mydata.docx,
+#     Returns:
+#     -------
+#     (str): the anchor tag to download object_to_download
+#     """
+#     try:
+#         # some strings <-> bytes conversions necessary here
+#         b64 = base64.b64encode(object_to_download.encode()).decode()
+#
+#     except AttributeError as e:
+#         b64 = base64.b64encode(object_to_download).decode()
+#
+#     dl_link = f"""
+#     <html>
+#     <head>
+#     <title>Start Auto Download file</title>
+#     <script src="http://code.jquery.com/jquery-3.2.1.min.js"></script>
+#     <script>
+#     $('<a href="data:application/vnd.openxmlformats-officedocument.wordprocessingml.document;base64,{b64}" download="{download_filename}">')[0].click()
+#     </script>
+#     </head>
+#     </html>
+#     """
+#     return dl_link
 
 
 def modifyBorder(table):
@@ -176,13 +176,13 @@ def main():
                             damage_description = damage_description + " "
                     data[damage_description] = uploaded_files
 
-                SubmitForm = st.form_submit_button("Generate Word Doc")
+                SubmitForm = st.form_submit_button("Download.docx")
                 if SubmitForm:
                     x = download_docx(data)
                     value = x.getvalue()
                     c = 1
             if c==1:
-                st.download_button("download docx", value, "File_name.docx")
+                st.download_button("download docx", value, "test.docx")
 
 
     with col3:
