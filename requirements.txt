@@ -22,6 +22,7 @@ mdurl
 numpy
 packaging
 pandas
+pdf2image
 Pillow
 pkgutil_resolve_name
 protobuf
