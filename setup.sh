@@ -1,19 +1,7 @@
-# Install system dependencies for PDF processing (if not already installed)
-if ! command -v pdftoppm &> /dev/null; then
-    echo "Installing poppler-utils for PDF processing..."
-    if command -v apt-get &> /dev/null; then
-        # Ubuntu/Debian
-        apt-get update && apt-get install -y poppler-utils
-    elif command -v yum &> /dev/null; then
-        # CentOS/RHEL
-        yum install -y poppler-utils
-    elif command -v apk &> /dev/null; then
-        # Alpine
-        apk add --no-cache poppler-utils
-    else
-        echo "Warning: Could not install poppler-utils automatically. PDF support may not work."
-    fi
-fi
+# PDF rendering needs no system packages: pypdfium2 ships PDFium as a
+# prebuilt wheel. The poppler install that used to live here never ran
+# on Render anyway - the service start command is 'streamlit run app.py',
+# so this script is not executed there at all.
 
 mkdir -p ~/.streamlit/
 

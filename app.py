@@ -85,6 +85,8 @@ VALID_PDF_TYPES = {"application/pdf"}
 
 UPLOAD_EXTS = ["jpg", "jpeg", "png", "gif", "bmp", "tiff", "webp", "pdf"]
 
+PDF_RENDER_DPI = 200     # first page of a PDF is rasterised at this resolution
+
 
 # ------------------------------------------------------------ image loading
 
@@ -109,18 +111,22 @@ def process_uploaded_image(uploaded_file):
         uploaded_file.seek(0)
 
         if ftype in VALID_PDF_TYPES:
+            # Rendered with pypdfium2, not pdf2image. pdf2image only wraps
+            # poppler's pdftoppm binary, which cannot be installed on Render's
+            # native Python runtime (no root at build or start time), so PDF
+            # upload silently failed in production. pypdfium2 ships PDFium as a
+            # prebuilt wheel, so pip install is the whole install.
+            import pypdfium2
+
+            pdf = pypdfium2.PdfDocument(uploaded_file.read())
             try:
-                from pdf2image import convert_from_bytes
-            except ImportError:
-                st.error(f"{name}: PDF support unavailable on this server.")
-                return None
-            pages = convert_from_bytes(
-                uploaded_file.read(), dpi=200, first_page=1, last_page=1
-            )
-            if not pages:
-                st.error(f"{name}: could not read any page from the PDF.")
-                return None
-            pil_image = pages[0]
+                if len(pdf) == 0:
+                    st.error(f"{name}: the PDF has no pages.")
+                    return None
+                # 200 dpi against PDF's 72 dpi user space
+                pil_image = pdf[0].render(scale=PDF_RENDER_DPI / 72).to_pil()
+            finally:
+                pdf.close()
         else:
             pil_image = Image.open(uploaded_file)
             pil_image = ImageOps.exif_transpose(pil_image)
