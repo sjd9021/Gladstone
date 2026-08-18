@@ -1,300 +1,412 @@
+"""
+Gladstone survey photo-sheet builder.
+
+Upload all survey photos at once, type a caption under each, and download a
+photo sheet formatted for the destination report:
+
+  * WK Webster  -> photo block and caption table RIGHT aligned
+  * Gladstone   -> photo block and caption table CENTRE aligned
+
+Both use Arial 11 written as *direct* run formatting (not just the Normal
+style), so that pasting into a report whose Normal style is Times New Roman
+does not silently re-font the captions.
+
+Layout constants were measured from real reports in the mail archive
+(G-2175-25GW, G-1754-25BW, G-1222-25BW for WKW; G-1623-25G, G-1544-25B for
+Gladstone).
+"""
+
+import io
+import logging
+
 import docx
-from docx.shared import Inches, Cm
-from docx.enum.text import WD_PARAGRAPH_ALIGNMENT
-from docx.shared import RGBColor
 import streamlit as st
-import numpy as np
-from docx.shared import Pt
 from docx.enum.table import WD_TABLE_ALIGNMENT
-from docx.oxml.table import CT_Row, CT_Tc
+from docx.enum.text import WD_PARAGRAPH_ALIGNMENT
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
-import io
-import streamlit.components.v1 as components
-import base64
-from PIL import Image
-import logging
-from pdf2image import convert_from_bytes
+from docx.shared import Cm, Pt
+from PIL import Image, ImageOps
 
-# Set up logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-document = docx.Document()
-style = document.styles['Normal']
-font = style.font
-font.name = 'Arial'
-font.size = Pt(11)
+# ---------------------------------------------------------------- constants
+
+FONT_NAME = "Arial"
+FONT_SIZE_PT = 11
+
+IMG_W_CM = 7.14          # measured: every photo in every sample report
+IMG_H_CM = 5.24
+CAPTION_ROW_H_CM = 1.0
+
+# The photos in a row are separated by a three-space run (as the existing
+# sheets do). Arial's space advance is 0.2778 em, so at 11pt three spaces are
+# 3 * 0.2778 * 11pt = 0.3233 cm. The caption table is widened by exactly that
+# much so its two cells stay centred under the two photos; the real reports
+# fudge this with a wider second column (gridCol 4048/4320) and end up ~1.6 mm
+# out. Unlike centre alignment, a right-aligned row shows the error in full.
+SPACER_TEXT = "   "
+SPACER_CM = len(SPACER_TEXT) * 0.2778 * FONT_SIZE_PT / 72 * 2.54
+
+# Word's default table cell margin, 108 twips. Applied as a paragraph indent
+# inside caption cells rather than as a cell margin - see _fix_table_layout.
+CELL_MARGIN_CM = 108 / 1440 * 2.54
+
+# Page setup per destination, so the sheet previews how the block will sit
+# in the real report. Only affects the sheet itself; a copy/paste carries
+# the content, not the section properties.
+LAYOUTS = {
+    "wkw": {
+        "label": "WK Webster",
+        "para_align": WD_PARAGRAPH_ALIGNMENT.RIGHT,
+        "table_align": WD_TABLE_ALIGNMENT.RIGHT,
+        "html_align": "right",
+        "align_word": "right",
+        "page_w_cm": 21.0, "page_h_cm": 29.7,       # A4
+        "margin_lr_cm": 1.9, "margin_t_cm": 2.54, "margin_b_cm": 1.27,
+    },
+    "gladstone": {
+        "label": "Gladstone",
+        "para_align": WD_PARAGRAPH_ALIGNMENT.CENTER,
+        "table_align": WD_TABLE_ALIGNMENT.CENTER,
+        "html_align": "center",
+        "align_word": "centre",
+        "page_w_cm": 21.0, "page_h_cm": 29.7,       # A4
+        "margin_lr_cm": 2.54, "margin_t_cm": 2.54, "margin_b_cm": 1.27,
+    },
+}
+
+VALID_IMAGE_TYPES = {
+    "image/jpeg", "image/jpg", "image/png", "image/gif",
+    "image/bmp", "image/tiff", "image/webp",
+}
+VALID_PDF_TYPES = {"application/pdf"}
+
+UPLOAD_EXTS = ["jpg", "jpeg", "png", "gif", "bmp", "tiff", "webp", "pdf"]
+
+
+# ------------------------------------------------------------ image loading
 
 def process_uploaded_image(uploaded_file):
-    """
-    Process uploaded file to ensure compatibility with python-docx
-    Returns a BytesIO object with a properly formatted image
+    """Normalise an upload to JPEG bytes that python-docx will accept.
+
+    Handles CMYK/RGBA/palette modes, honours EXIF orientation (phone photos
+    are routinely stored rotated), and rasterises the first page of a PDF.
+    Returns raw JPEG bytes, or None on failure.
     """
     if uploaded_file is None:
-        logger.info("No file uploaded")
         return None
-    
-    # Log file details
-    logger.info(f"Processing file: {uploaded_file.name}")
-    logger.info(f"File type: {uploaded_file.type}")
-    logger.info(f"File size: {uploaded_file.size} bytes")
-    
-    # Check if it's a valid file type (images or PDF)
-    valid_image_types = [
-        'image/jpeg', 'image/jpg', 'image/png', 'image/gif', 
-        'image/bmp', 'image/tiff', 'image/webp'
-    ]
-    valid_pdf_types = ['application/pdf']
-    valid_types = valid_image_types + valid_pdf_types
-    
-    if uploaded_file.type not in valid_types:
-        error_msg = f"Invalid file type: {uploaded_file.type}. Please upload an image file (JPEG, PNG, GIF, BMP, TIFF, WEBP) or PDF."
-        logger.error(error_msg)
-        st.error(error_msg)
+
+    ftype = (uploaded_file.type or "").lower()
+    name = uploaded_file.name
+
+    if ftype not in VALID_IMAGE_TYPES | VALID_PDF_TYPES:
+        st.error(f"{name}: unsupported file type ({ftype or 'unknown'}).")
         return None
-    
+
     try:
-        # Reset file pointer
         uploaded_file.seek(0)
-        logger.info("File pointer reset to beginning")
-        
-        # Handle PDF files differently
-        if uploaded_file.type == 'application/pdf':
-            logger.info("Processing PDF file")
-            # Convert PDF to images (first page only for now)
-            pdf_bytes = uploaded_file.read()
-            images = convert_from_bytes(pdf_bytes, dpi=200, first_page=1, last_page=1)
-            
-            if not images:
-                raise Exception("Could not convert PDF to image")
-            
-            pil_image = images[0]  # Take first page
-            logger.info(f"PDF converted to image successfully: {pil_image.size}, mode: {pil_image.mode}")
+
+        if ftype in VALID_PDF_TYPES:
+            try:
+                from pdf2image import convert_from_bytes
+            except ImportError:
+                st.error(f"{name}: PDF support unavailable on this server.")
+                return None
+            pages = convert_from_bytes(
+                uploaded_file.read(), dpi=200, first_page=1, last_page=1
+            )
+            if not pages:
+                st.error(f"{name}: could not read any page from the PDF.")
+                return None
+            pil_image = pages[0]
         else:
-            # Handle regular image files
             pil_image = Image.open(uploaded_file)
-            logger.info(f"Image opened successfully: {pil_image.size}, mode: {pil_image.mode}")
-        
-        # Convert to RGB if necessary (handles CMYK, RGBA, etc.)
-        if pil_image.mode not in ('RGB', 'L'):
-            logger.info(f"Converting from {pil_image.mode} to RGB")
-            pil_image = pil_image.convert('RGB')
-        
-        # Save to BytesIO as JPEG (most compatible format)
-        img_buffer = io.BytesIO()
-        pil_image.save(img_buffer, format='JPEG', quality=95)
-        img_buffer.seek(0)
-        
-        logger.info(f"File processed successfully, output size: {len(img_buffer.getvalue())} bytes")
-        return img_buffer
-        
-    except Exception as e:
-        error_msg = f"Error processing file '{uploaded_file.name}': {str(e)}"
-        logger.error(error_msg)
-        st.error(error_msg)
+            pil_image = ImageOps.exif_transpose(pil_image)
+
+        if pil_image.mode not in ("RGB", "L"):
+            pil_image = pil_image.convert("RGB")
+
+        buf = io.BytesIO()
+        pil_image.save(buf, format="JPEG", quality=90)
+        return buf.getvalue()
+
+    except Exception as exc:                       # noqa: BLE001 - surfaced to user
+        logger.exception("failed to process %s", name)
+        st.error(f"{name}: could not be processed ({exc}).")
         return None
 
-# def download_button(object_to_download, download_filename):
-#     """
-#     Generates a link to download the given object_to_download.
-#     Params:
-#     ------
-#     object_to_download:  The object to be downloaded.
-#     download_filename (str): filename and extension of file. e.g. mydata.docx,
-#     Returns:
-#     -------
-#     (str): the anchor tag to download object_to_download
-#     """
-#     try:
-#         # some strings <-> bytes conversions necessary here
-#         b64 = base64.b64encode(object_to_download.encode()).decode()
-#
-#     except AttributeError as e:
-#         b64 = base64.b64encode(object_to_download).decode()
-#
-#     dl_link = f"""
-#     <html>
-#     <head>
-#     <title>Start Auto Download file</title>
-#     <script src="http://code.jquery.com/jquery-3.2.1.min.js"></script>
-#     <script>
-#     $('<a href="data:application/vnd.openxmlformats-officedocument.wordprocessingml.document;base64,{b64}" download="{download_filename}">')[0].click()
-#     </script>
-#     </head>
-#     </html>
-#     """
-#     return dl_link
+
+# --------------------------------------------------------- docx formatting
+
+def _force_font(run):
+    """Write Arial 11 directly onto the run.
+
+    python-docx's ``run.font.name`` only sets w:ascii and w:hAnsi. Word uses
+    w:cs for complex-script and w:eastAsia for CJK runs, so a caption can
+    still drift on paste unless all four are set. Direct run formatting
+    survives 'use destination styles', which style-level Arial does not.
+    """
+    run.font.name = FONT_NAME
+    run.font.size = Pt(FONT_SIZE_PT)
+    rPr = run._element.get_or_add_rPr()
+    rFonts = rPr.find(qn("w:rFonts"))
+    if rFonts is None:
+        rFonts = OxmlElement("w:rFonts")
+        rPr.append(rFonts)
+    for attr in ("w:ascii", "w:hAnsi", "w:cs", "w:eastAsia"):
+        rFonts.set(qn(attr), FONT_NAME)
 
 
-def modifyBorder(table):
-    tbl = table._tbl  # get xml element in table
-    for cell in tbl.iter_tcs():
-        tcPr = cell.tcPr  # get tcPr element, in which we can define style of borders
-        tcBorders = OxmlElement('w:tcBorders')
-        top = OxmlElement('w:top')
-        top.set(qn('w:val'), 'nil')
-
-        left = OxmlElement('w:left')
-        left.set(qn('w:val'), 'nil')
-
-        bottom = OxmlElement('w:bottom')
-        bottom.set(qn('w:val'), 'nil')
-        bottom.set(qn('w:sz'), '4')
-        bottom.set(qn('w:space'), '0')
-        bottom.set(qn('w:color'), 'auto')
-
-        right = OxmlElement('w:right')
-        right.set(qn('w:val'), 'nil')
-
-        tcBorders.append(top)
-        tcBorders.append(left)
-        tcBorders.append(bottom)
-        tcBorders.append(right)
-        tcPr.append(tcBorders)
+def _clear_borders(table):
+    """Blank every cell border, matching the existing hand-made sheets."""
+    for cell in table._tbl.iter_tcs():
+        tcPr = cell.tcPr
+        borders = OxmlElement("w:tcBorders")
+        for edge in ("top", "left", "bottom", "right"):
+            el = OxmlElement(f"w:{edge}")
+            el.set(qn("w:val"), "nil")
+            borders.append(el)
+        tcPr.append(borders)
 
 
-def add_imgs(imgs):
-    p = document.add_paragraph()
-    p.paragraph_format.space_before = Pt(0)
-    p.paragraph_format.space_after = Pt(0)
-    r = p.add_run()
-    for x in imgs:
-        if imgs[x] is not None:
-            # Process the image to ensure compatibility
-            processed_image = process_uploaded_image(imgs[x])
-            if processed_image is not None:
-                try:
-                    r.add_picture(processed_image, width=Cm(7.14), height=Cm(5.24))
-                    r.add_text("   ")
-                except Exception as e:
-                    st.error(f"Failed to add image '{x}': {str(e)}")
-                    continue
-    last_paragraph = document.paragraphs[-1]
-    last_paragraph.alignment = WD_PARAGRAPH_ALIGNMENT.CENTER
-    return
+def _caption_widths(n_photos):
+    """Column widths that put one cell exactly under each photo.
+
+    The photo row is  [photo][spacer][photo], so the caption table gets the
+    same alternating columns. The narrow spacer column is empty and borderless;
+    it exists so each caption column sits exactly under its photo rather than
+    the pair being split evenly. Total table width equals total photo-row
+    width, so both edges of the block line up.
+    """
+    widths = [IMG_W_CM]
+    for _ in range(n_photos - 1):
+        widths += [SPACER_CM, IMG_W_CM]
+    return widths
 
 
-def add_text(imgs):
+def _fix_table_layout(table, jc_val, widths_cm):
+    """Pin the caption table the way the real reports do it.
 
-    # r = p.add_run()
-    leng = len(imgs)
-    table = document.add_table(rows=1, cols=leng)
-    table.style = 'TableGrid'  # single lines in all cells
-    table.autofit = False
-    table.allow_autofit = False
+    Without ``tblLayout fixed`` Word and LibreOffice widen the cell to fit the
+    caption on one line, so a long caption spills past the photo instead of
+    wrapping under it. The real sheets also repeat ``jc`` on the row, which is
+    what keeps the block flush right once it lands in the report.
+    """
+    twips = [int(round(w / 2.54 * 1440)) for w in widths_cm]
 
-    for cell in table.columns[0].cells:
-        cell.width = Cm(7.14)
+    tblPr = table._tbl.tblPr
+    layout = tblPr.find(qn("w:tblLayout"))
+    if layout is None:
+        layout = OxmlElement("w:tblLayout")
+        tblPr.append(layout)
+    layout.set(qn("w:type"), "fixed")
+
+    grid = table._tbl.find(qn("w:tblGrid"))
+    if grid is not None:
+        for col, w in zip(grid.findall(qn("w:gridCol")), twips):
+            col.set(qn("w:w"), str(w))
+
     for row in table.rows:
-        row.height = Cm(1)
+        trPr = row._tr.get_or_add_trPr()
+        jc = trPr.find(qn("w:jc"))
+        if jc is None:
+            jc = OxmlElement("w:jc")
+            trPr.append(jc)
+        jc.set(qn("w:val"), jc_val)
+        for idx, (cell, w) in enumerate(zip(row.cells, twips)):
+            tcPr = cell._tc.get_or_add_tcPr()
+            tcW = tcPr.find(qn("w:tcW"))
+            if tcW is None:
+                tcW = OxmlElement("w:tcW")
+                tcPr.append(tcW)
+            tcW.set(qn("w:w"), str(w))
+            tcW.set(qn("w:type"), "dxa")
 
-    # r.font.color.rgb = RGBColor(255, 0, 0)
-    c = 0
+            # Every column gets zero cell margins, for two separate reasons.
+            # The narrow spacer columns are thinner than Word's default 108
+            # twip margins, and Word refuses to draw a cell narrower than its
+            # own margins - it widens the column and pushes the captions to its
+            # right out of line. And for a right-aligned table Word offsets the
+            # whole table by the trailing cell margin so that cell *content*,
+            # not the cell edge, meets the page margin, which shifts every
+            # caption 0.19 cm right of its photo. With the margins at zero the
+            # table's edges are the photo block's edges. The same 0.19 cm inset
+            # is restored as a paragraph indent inside the caption cells, so
+            # captions still wrap at the width the existing reports use.
+            tcMar = OxmlElement("w:tcMar")
+            for side in ("left", "right"):
+                el = OxmlElement(f"w:{side}")
+                el.set(qn("w:w"), "0")
+                el.set(qn("w:type"), "dxa")
+                tcMar.append(el)
+            tcPr.append(tcMar)
 
-    for x in imgs:
-        p = table.cell(0, c).paragraphs[0]
-        p.alignment = docx.enum.text.WD_PARAGRAPH_ALIGNMENT.CENTER
-        run = table.cell(0, c).paragraphs[0].add_run("   " + x)
 
-        c = c + 1
-    table.alignment = WD_TABLE_ALIGNMENT.CENTER
-    modifyBorder(table)
-    p = document.add_paragraph()
-    p.paragraph_format.space_after = Pt(0)
-    return
+def _add_photo_row(document, chunk, layout):
+    """One row of photos (1 or 2) followed by its caption table."""
+    para = document.add_paragraph()
+    para.paragraph_format.space_before = Pt(0)
+    para.paragraph_format.space_after = Pt(0)
+    para.alignment = layout["para_align"]
+    run = para.add_run()
 
-def image_converter(imgs):
+    for idx, (_, jpeg) in enumerate(chunk):
+        if idx:
+            run.add_text(SPACER_TEXT)       # between photos only
+        run.add_picture(io.BytesIO(jpeg), width=Cm(IMG_W_CM), height=Cm(IMG_H_CM))
+    _force_font(run)
 
-    pairs = list(imgs.items())
-    for i in range(0, len(pairs), 2):
-        if i + 1 < len(pairs):
-            dicter = {pairs[i][0]: pairs[i][1], pairs[i + 1][0]: pairs[i + 1][1]}
-            add_imgs(dicter)
-            add_text(dicter)
+    widths = _caption_widths(len(chunk))
 
-    # If the number of key-value pairs is odd, print the last key-value pair separately
-    if len(pairs) % 2 != 0:
-        dicter = {pairs[-1][0]:pairs[-1][1]}
-        add_imgs(dicter)
-        add_text(dicter)
+    table = document.add_table(rows=1, cols=len(widths))
+    table.autofit = False
+    table.alignment = layout["table_align"]
 
-    # print(dicter)
+    for idx, (caption, _) in enumerate(chunk):
+        cell = table.cell(0, idx * 2)          # skip the spacer columns
+        cell_para = cell.paragraphs[0]
+        cell_para.alignment = WD_PARAGRAPH_ALIGNMENT.CENTER   # centred in both formats
+        cell_para.paragraph_format.left_indent = Cm(CELL_MARGIN_CM)
+        cell_para.paragraph_format.right_indent = Cm(CELL_MARGIN_CM)
+        _force_font(cell_para.add_run(caption or ""))
 
-    # document.save('online_demo.docx')
-    return document
-def download_docx(data):
-    edited_doc = image_converter(data)
-    buff = io.BytesIO()  # create a buffer
-    document.save(buff)  # write the docx to the buffers
-    return buff
-    # components.html(
-    #     download_button(buff.getvalue(), "test.docx"),
-    #     height=0,
-    # )
+    for row in table.rows:
+        row.height = Cm(CAPTION_ROW_H_CM)
+
+    _clear_borders(table)
+    _fix_table_layout(table, layout["html_align"], widths)
+
+    spacer = document.add_paragraph()
+    spacer.paragraph_format.space_after = Pt(0)
+
+
+def build_docx(items, layout_key):
+    """items: list of (caption, jpeg_bytes). Returns a .docx as bytes."""
+    layout = LAYOUTS[layout_key]
+
+    document = docx.Document()          # per-call, never module-level
+    normal = document.styles["Normal"].font
+    normal.name = FONT_NAME
+    normal.size = Pt(FONT_SIZE_PT)
+
+    section = document.sections[0]
+    section.page_width = Cm(layout["page_w_cm"])
+    section.page_height = Cm(layout["page_h_cm"])
+    section.left_margin = Cm(layout["margin_lr_cm"])
+    section.right_margin = Cm(layout["margin_lr_cm"])
+    section.top_margin = Cm(layout["margin_t_cm"])
+    section.bottom_margin = Cm(layout["margin_b_cm"])
+
+    for i in range(0, len(items), 2):
+        _add_photo_row(document, items[i:i + 2], layout)
+
+    buf = io.BytesIO()
+    document.save(buf)
+    return buf.getvalue()
+
+
+# ----------------------------------------------------------------- the app
+
+def _file_key(f):
+    return f"{f.name}::{f.size}"
+
+
+def _load_items(files, order):
+    """Return [(caption, jpeg_bytes)] in display order, caching decoded JPEGs."""
+    cache = st.session_state.setdefault("jpeg_cache", {})
+    by_key = {_file_key(f): f for f in files}
+    items = []
+    for key in order:
+        f = by_key.get(key)
+        if f is None:
+            continue
+        if key not in cache:
+            cache[key] = process_uploaded_image(f)
+        if cache[key] is None:
+            continue
+        items.append((st.session_state.get(f"cap::{key}", "") or "", cache[key]))
+    return items
+
 
 def main():
-    st.markdown("<h1 style='text-align: center; color: grey;'>Image Parser</h1>", unsafe_allow_html=True)
-    c = 0
-    col1, col2, col3 = st.columns([1, 3, 1])
+    st.set_page_config(page_title="Gladstone Photo Sheet", layout="centered")
+    st.markdown(
+        "<h1 style='text-align:center;color:grey;'>Survey Photo Sheet</h1>",
+        unsafe_allow_html=True,
+    )
 
-    data = {}
-    with col1:
-        st.write(' ')
+    files = st.file_uploader(
+        "Drop all survey photos here (you can select many at once)",
+        type=UPLOAD_EXTS,
+        accept_multiple_files=True,
+        help="JPEG, PNG, GIF, BMP, TIFF, WEBP or PDF (first page of a PDF is used).",
+    )
 
-    with col2:
-        with st.form("Number of Products"):
+    if not files:
+        st.info("Upload photos to begin. Two photos go side by side per row.")
+        return
 
-            numImages = st.number_input('Number Of Images', key='numImages', step=1)
-            submitForm = st.form_submit_button("Set Image Number")
+    keys = [_file_key(f) for f in files]
+    order = [k for k in st.session_state.get("order", []) if k in keys]
+    order += [k for k in keys if k not in order]
+    st.session_state["order"] = order
 
-        if 'numImages' in st.session_state.keys():
-            with st.form("Product Codes"):
-                for i in range(int(st.session_state['numImages'])):
-                    uploaded_files = st.file_uploader(
-                        "Image or PDF", 
-                        key=i + 1,
-                        type=['jpg', 'jpeg', 'png', 'gif', 'bmp', 'tiff', 'webp', 'pdf'],
-                        help="Upload an image file (JPEG, PNG, GIF, BMP, TIFF, WEBP) or PDF (first page will be used)"
-                    )
-                    damage_description = st.text_input('Description', key=i * 100)
-                    for x in data:
-                        if damage_description == x:
-                            damage_description = damage_description + " "
-                    data[damage_description] = uploaded_files
+    by_key = {_file_key(f): f for f in files}
 
-                SubmitForm = st.form_submit_button("Download.docx")
-                if SubmitForm:
-                    # Debug: Show what data we have
-                    st.write("Debug - Data collected:")
-                    for desc, file in data.items():
-                        if file is not None:
-                            st.write(f"- {desc}: {file.name} ({file.type}, {file.size} bytes)")
-                        else:
-                            st.write(f"- {desc}: No file uploaded")
-                    
-                    # Check if any images were uploaded
-                    valid_files = [v for v in data.values() if v is not None]
-                    if len(valid_files) == 0:
-                        st.error("Please upload at least one image before downloading.")
-                    else:
-                        try:
-                            logger.info(f"Starting document creation with {len(valid_files)} files")
-                            x = download_docx(data)
-                            value = x.getvalue()
-                            logger.info(f"Document created successfully, size: {len(value)} bytes")
-                            c = 1
-                        except Exception as e:
-                            error_msg = f"Error creating document: {str(e)}"
-                            logger.error(error_msg)
-                            st.error(error_msg)
-                            c = 0
-            if c==1:
-                st.download_button("download docx", value, "test.docx")
+    st.caption(f"{len(order)} photo(s). Type the description under each; use the arrows to reorder.")
 
+    for pos, key in enumerate(order):
+        f = by_key[key]
+        col_img, col_txt, col_up, col_dn = st.columns([2, 6, 1, 1])
+        with col_img:
+            if (f.type or "").lower() in VALID_PDF_TYPES:
+                st.write("PDF")
+            else:
+                f.seek(0)
+                st.image(f, width=110)
+        with col_txt:
+            st.text_input(
+                f"Photo {pos + 1} description",
+                key=f"cap::{key}",
+                label_visibility="collapsed",
+                placeholder=f"Photo {pos + 1} description",
+            )
+        with col_up:
+            if st.button("↑", key=f"up::{key}", disabled=(pos == 0)):
+                order[pos - 1], order[pos] = order[pos], order[pos - 1]
+                st.session_state["order"] = order
+                st.rerun()
+        with col_dn:
+            if st.button("↓", key=f"dn::{key}", disabled=(pos == len(order) - 1)):
+                order[pos + 1], order[pos] = order[pos], order[pos + 1]
+                st.session_state["order"] = order
+                st.rerun()
 
-    with col3:
-        st.write(' ')
+    st.divider()
+
+    items = _load_items(files, order)
+    if not items:
+        st.error("None of the uploaded files could be read.")
+        return
+
+    for layout_key in ("wkw", "gladstone"):
+        layout = LAYOUTS[layout_key]
+        st.subheader(layout["label"])
+        st.caption(
+            f"Photos and captions aligned {layout['align_word']}, "
+            f"Arial {FONT_SIZE_PT}pt fixed on every run. "
+            "Open it, select all, copy, and paste into the report."
+        )
+        st.download_button(
+            "Download .docx",
+            data=build_docx(items, layout_key),
+            file_name=f"Survey Photo Sheet - {layout['label']}.docx",
+            mime=("application/vnd.openxmlformats-officedocument"
+                  ".wordprocessingml.document"),
+            key=f"dl::{layout_key}",
+        )
 
 
 if __name__ == "__main__":
