@@ -23,6 +23,14 @@ Requires macOS with Word installed, and Automation permission for the terminal
 running it. Word must not already be sitting on a modal dialog, or the export
 silently produces nothing.
 
+Working files go in ~/Documents/photo-sheet-verify rather than a system temp
+directory. Word is sandboxed, and opening a file in /var/folders or /tmp makes
+it raise a "Grant File Access" sheet that nobody can see and that blocks
+AppleScript until it times out - which looks exactly like Word hanging. The
+first run against a new folder still shows that sheet once; click Grant Access
+and Word remembers it, which is why the folder is stable and is not deleted
+between runs.
+
 Usage:
     python verify_layout.py
 """
@@ -30,7 +38,6 @@ Usage:
 import io
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 
 import numpy as np
@@ -159,8 +166,15 @@ def main():
     sys.path.insert(0, str(Path(__file__).parent))
     import app
 
-    tmp = Path(tempfile.mkdtemp())
-    ok = all(check(app, key, tmp) for key in ("wkw", "gladstone"))
+    # A stable, non-hidden folder: Word grants file access per folder, and
+    # deleting and recreating it makes Word re-prompt on every run.
+    tmp = Path.home() / "Documents" / "photo-sheet-verify"
+    tmp.mkdir(parents=True, exist_ok=True)
+    try:
+        ok = all(check(app, key, tmp) for key in ("wkw", "gladstone"))
+    finally:
+        for leftover in tmp.glob("verify_*"):
+            leftover.unlink(missing_ok=True)
     print("\nRESULT:", "PASS" if ok else "FAIL")
     return 0 if ok else 1
 

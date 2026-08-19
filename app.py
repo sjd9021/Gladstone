@@ -86,6 +86,7 @@ VALID_PDF_TYPES = {"application/pdf"}
 UPLOAD_EXTS = ["jpg", "jpeg", "png", "gif", "bmp", "tiff", "webp", "pdf"]
 
 PDF_RENDER_DPI = 200     # first page of a PDF is rasterised at this resolution
+PREVIEW_W_PX = 250       # on-screen thumbnail width
 
 
 # ------------------------------------------------------------ image loading
@@ -319,21 +320,29 @@ def _file_key(f):
     return f"{f.name}::{f.size}"
 
 
-def _load_items(files, order):
-    """Return [(caption, jpeg_bytes)] in display order, caching decoded JPEGs."""
+def _decode(files, order):
+    """key -> JPEG bytes (None if unreadable), decoded once per upload.
+
+    The same decoded bytes feed the on-screen preview and the document, so the
+    thumbnail is exactly what will be placed in the sheet - including the first
+    page of a PDF and any EXIF rotation that has been applied.
+    """
     cache = st.session_state.setdefault("jpeg_cache", {})
     by_key = {_file_key(f): f for f in files}
-    items = []
     for key in order:
+        if key in cache:
+            continue
         f = by_key.get(key)
-        if f is None:
-            continue
-        if key not in cache:
-            cache[key] = process_uploaded_image(f)
-        if cache[key] is None:
-            continue
-        items.append((st.session_state.get(f"cap::{key}", "") or "", cache[key]))
-    return items
+        cache[key] = process_uploaded_image(f) if f is not None else None
+    return {key: cache.get(key) for key in order}
+
+
+def _load_items(jpegs, order):
+    """Return [(caption, jpeg_bytes)] in display order, skipping unreadable files."""
+    return [
+        (st.session_state.get(f"cap::{key}", "") or "", jpegs[key])
+        for key in order if jpegs.get(key) is not None
+    ]
 
 
 def main():
@@ -363,15 +372,21 @@ def main():
 
     st.caption(f"{len(order)} photo(s). Type the description under each; use the arrows to reorder.")
 
+    jpegs = _decode(files, order)
+
     for pos, key in enumerate(order):
         f = by_key[key]
-        col_img, col_txt, col_up, col_dn = st.columns([2, 6, 1, 1])
+        col_img, col_txt, col_up, col_dn = st.columns(
+            [4, 5, 1, 1], vertical_alignment="center"
+        )
         with col_img:
-            if (f.type or "").lower() in VALID_PDF_TYPES:
-                st.write("PDF")
+            jpeg = jpegs.get(key)
+            if jpeg is None:
+                st.warning(f"{f.name}: could not be read")
             else:
-                f.seek(0)
-                st.image(f, width=110)
+                # explicit pixel width rather than use_container_width, which is
+                # on its way out of the Streamlit API
+                st.image(jpeg, width=PREVIEW_W_PX)
         with col_txt:
             st.text_input(
                 f"Photo {pos + 1} description",
@@ -392,7 +407,7 @@ def main():
 
     st.divider()
 
-    items = _load_items(files, order)
+    items = _load_items(jpegs, order)
     if not items:
         st.error("None of the uploaded files could be read.")
         return
