@@ -83,7 +83,11 @@ def measure(pdf_path):
 
     saturated = (a.max(axis=2) - a.min(axis=2)) > 40      # the test photos
     yellow = (a[:, :, 0] > 170) & (a[:, :, 1] > 170) & (a[:, :, 2] < 130)
-    ink = np.asarray(img.convert("L")) < 180
+    # Caption text only: black-ish pixels that are not part of a photo. The
+    # rows pack tightly enough that the caption search strip below one photo
+    # row can clip the top of the next row's photos; without this exclusion
+    # those photo pixels get averaged into the "caption" centre.
+    ink = (np.asarray(img.convert("L")) < 180) & ~saturated
 
     rows = np.flatnonzero(saturated.sum(axis=1) > 0.2 * width)
     if rows.size == 0:
@@ -92,7 +96,7 @@ def measure(pdf_path):
     starts = np.r_[rows[0], rows[brk + 1]]
     ends = np.r_[rows[brk], rows[-1]] + 1
 
-    for y0, y1 in zip(starts, ends):
+    for idx, (y0, y1) in enumerate(zip(starts, ends)):
         band = saturated[y0:y1]
         cols = np.flatnonzero(band.sum(axis=0) > 0.5 * (y1 - y0))
         if cols.size == 0:
@@ -104,7 +108,13 @@ def measure(pdf_path):
         if not photos:
             continue
 
-        caption_band = ink[y1:y1 + int(1.6 * PPC)]
+        # The caption strip runs from this photo row's bottom to just above
+        # the next photo row (or a fixed 1.6 cm on the last row). A fixed
+        # height bled into the following row once the spacing fix packed the
+        # rows tighter, and stray dark pixels there skewed the caption centre.
+        strip_end = (int(starts[idx + 1]) - 2 if idx + 1 < len(starts)
+                     else y1 + int(1.6 * PPC))
+        caption_band = ink[y1:strip_end]
         centres, captions = [], []
         for s, e in photos:
             strip = yellow[y0:y1, s:e]

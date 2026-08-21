@@ -86,6 +86,7 @@ VALID_PDF_TYPES = {"application/pdf"}
 UPLOAD_EXTS = ["jpg", "jpeg", "png", "gif", "bmp", "tiff", "webp", "pdf"]
 
 PDF_RENDER_DPI = 200     # first page of a PDF is rasterised at this resolution
+EMBED_MAX_PX = 1600      # longest side of an embedded photo
 PREVIEW_W_PX = 250       # on-screen thumbnail width
 
 
@@ -135,8 +136,15 @@ def process_uploaded_image(uploaded_file):
         if pil_image.mode not in ("RGB", "L"):
             pil_image = pil_image.convert("RGB")
 
+        # Downscale before embedding. Photos are placed at 7.14 cm wide, so
+        # full camera resolution (~4000 px, 2-4 MB each) is invisible on the
+        # page and makes a 100-photo sheet a several-hundred-MB document that
+        # exhausts the server's memory. 1600 px is ~570 dpi at placed size;
+        # the office's hand-made sheets run ~160-250 KB per photo.
+        pil_image.thumbnail((EMBED_MAX_PX, EMBED_MAX_PX))
+
         buf = io.BytesIO()
-        pil_image.save(buf, format="JPEG", quality=90)
+        pil_image.save(buf, format="JPEG", quality=85)
         return buf.getvalue()
 
     except Exception as exc:                       # noqa: BLE001 - surfaced to user
@@ -297,6 +305,21 @@ def build_docx(items, layout_key):
     normal = document.styles["Normal"].font
     normal.name = FONT_NAME
     normal.size = Pt(FONT_SIZE_PT)
+
+    # python-docx's template ships docDefaults of 10pt space-after and 1.15
+    # line spacing, so pressing Enter anywhere in the sheet (or in content
+    # pasted from it) inserts what looks like a blank line. The real WKW
+    # final report carries no such defaults; match it: no space after,
+    # single-spaced.
+    styles_root = document.styles.element
+    pPrDefault = styles_root.find(
+        qn("w:docDefaults") + "/" + qn("w:pPrDefault"))
+    if pPrDefault is not None:
+        spacing = pPrDefault.find(qn("w:pPr") + "/" + qn("w:spacing"))
+        if spacing is not None:
+            spacing.set(qn("w:after"), "0")
+            spacing.set(qn("w:line"), "240")
+            spacing.set(qn("w:lineRule"), "auto")
 
     section = document.sections[0]
     section.page_width = Cm(layout["page_w_cm"])
